@@ -16,6 +16,7 @@ export interface DiscordComponent {
   style?: number;
   label?: string;
   custom_id?: string;
+  url?: string;
 }
 
 export interface DiscordMessage {
