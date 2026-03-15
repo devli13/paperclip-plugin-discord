@@ -10,6 +10,8 @@ interface InteractionOption {
 
 interface InteractionData {
   name: string;
+  custom_id?: string;
+  component_type?: number;
   options?: InteractionOption[];
 }
 
@@ -85,7 +87,7 @@ export async function handleInteraction(
 
   // Type 3 = MESSAGE_COMPONENT (button click)
   if (interaction.type === 3 && interaction.data) {
-    return handleButtonClick(ctx, interaction.data);
+    return handleButtonClick(ctx, interaction.data, interaction.member?.user.username);
   }
 
   return respondToInteraction({
@@ -213,27 +215,73 @@ async function handleBudget(
 async function handleButtonClick(
   ctx: PluginContext,
   data: InteractionData,
+  username?: string,
 ): Promise<unknown> {
-  const customId = data.name;
+  const customId = data.custom_id ?? data.name;
+  const actor = username ?? "Discord user";
 
   if (customId.startsWith("approval_approve_")) {
     const approvalId = customId.replace("approval_approve_", "");
-    ctx.logger.info("Approval button clicked", { approvalId, action: "approve" });
-    // TODO: call approval API
-    return respondToInteraction({
-      type: 7, // UPDATE_MESSAGE
-      content: `Approved by Discord user.`,
-    });
+    ctx.logger.info("Approval button clicked", { approvalId, action: "approve", actor });
+
+    try {
+      await ctx.http.fetch(
+        `http://localhost:3100/api/approvals/${approvalId}/approve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decidedByUserId: `discord:${actor}` }),
+        },
+      );
+    } catch (err) {
+      ctx.logger.error("Failed to approve via API", { approvalId, error: String(err) });
+    }
+
+    return {
+      type: 7, // UPDATE_MESSAGE — replaces the original message
+      data: {
+        embeds: [{
+          title: "Approval Resolved",
+          description: `**Approved** by ${actor}`,
+          color: COLORS.GREEN,
+          footer: { text: "Paperclip" },
+          timestamp: new Date().toISOString(),
+        }],
+        components: [], // Remove buttons
+      },
+    };
   }
 
   if (customId.startsWith("approval_reject_")) {
     const approvalId = customId.replace("approval_reject_", "");
-    ctx.logger.info("Rejection button clicked", { approvalId, action: "reject" });
-    // TODO: call approval API
-    return respondToInteraction({
+    ctx.logger.info("Rejection button clicked", { approvalId, action: "reject", actor });
+
+    try {
+      await ctx.http.fetch(
+        `http://localhost:3100/api/approvals/${approvalId}/reject`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decidedByUserId: `discord:${actor}` }),
+        },
+      );
+    } catch (err) {
+      ctx.logger.error("Failed to reject via API", { approvalId, error: String(err) });
+    }
+
+    return {
       type: 7,
-      content: `Rejected by Discord user.`,
-    });
+      data: {
+        embeds: [{
+          title: "Approval Resolved",
+          description: `**Rejected** by ${actor}`,
+          color: COLORS.RED,
+          footer: { text: "Paperclip" },
+          timestamp: new Date().toISOString(),
+        }],
+        components: [], // Remove buttons
+      },
+    };
   }
 
   return respondToInteraction({

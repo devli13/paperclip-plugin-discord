@@ -59,6 +59,24 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Channel ID to post notifications to.",
         default: DEFAULT_CONFIG.defaultChannelId,
       },
+      approvalsChannelId: {
+        type: "string",
+        title: "Approvals Channel ID",
+        description: "Channel ID for approval requests. Falls back to default channel.",
+        default: DEFAULT_CONFIG.approvalsChannelId,
+      },
+      errorsChannelId: {
+        type: "string",
+        title: "Errors Channel ID",
+        description: "Channel ID for agent error notifications. Falls back to default channel.",
+        default: DEFAULT_CONFIG.errorsChannelId,
+      },
+      bdPipelineChannelId: {
+        type: "string",
+        title: "BD Pipeline Channel ID",
+        description: "Channel ID for agent run lifecycle events. Falls back to default channel.",
+        default: DEFAULT_CONFIG.bdPipelineChannelId,
+      },
       notifyOnIssueCreated: {
         type: "boolean",
         title: "Notify on issue created",

@@ -28,6 +28,9 @@ type DiscordConfig = {
   discordBotTokenRef: string;
   defaultGuildId: string;
   defaultChannelId: string;
+  approvalsChannelId: string;
+  errorsChannelId: string;
+  bdPipelineChannelId: string;
   notifyOnIssueCreated: boolean;
   notifyOnIssueDone: boolean;
   notifyOnApprovalCreated: boolean;
@@ -89,14 +92,14 @@ const plugin = definePlugin({
     });
 
     // Clean up Gateway connection when plugin stops
-    ctx.events.on("plugin.stopping", () => {
+    ctx.events.on("plugin.stopping", async () => {
       gateway.close();
     });
 
     // --- Event subscriptions (notification pattern from Slack plugin) ---
 
-    const notify = async (event: PluginEvent, formatter: (e: PluginEvent) => ReturnType<typeof formatIssueCreated>) => {
-      const channelId = await resolveChannel(ctx, event.companyId, config.defaultChannelId);
+    const notify = async (event: PluginEvent, formatter: (e: PluginEvent) => ReturnType<typeof formatIssueCreated>, overrideChannelId?: string) => {
+      const channelId = await resolveChannel(ctx, event.companyId, overrideChannelId || config.defaultChannelId);
       if (!channelId) return;
       const delivered = await postEmbed(ctx, token, channelId, formatter(event));
       if (delivered) {
@@ -125,22 +128,22 @@ const plugin = definePlugin({
 
     if (config.notifyOnApprovalCreated) {
       ctx.events.on("approval.created", (event: PluginEvent) =>
-        notify(event, formatApprovalCreated),
+        notify(event, formatApprovalCreated, config.approvalsChannelId),
       );
     }
 
     if (config.notifyOnAgentError) {
       ctx.events.on("agent.run.failed", (event: PluginEvent) =>
-        notify(event, formatAgentError),
+        notify(event, formatAgentError, config.errorsChannelId),
       );
     }
 
     // Always subscribe to run lifecycle for activity logging
     ctx.events.on("agent.run.started", (event: PluginEvent) =>
-      notify(event, formatAgentRunStarted),
+      notify(event, formatAgentRunStarted, config.bdPipelineChannelId),
     );
     ctx.events.on("agent.run.finished", (event: PluginEvent) =>
-      notify(event, formatAgentRunFinished),
+      notify(event, formatAgentRunFinished, config.bdPipelineChannelId),
     );
 
     // --- Per-company channel overrides ---
