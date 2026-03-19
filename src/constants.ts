@@ -26,6 +26,9 @@ export const DEFAULT_CONFIG = {
   notifyOnAgentError: true,
   enableIntelligence: false,
   intelligenceChannelIds: [] as string[],
+  escalationChannelId: "",
+  enableEscalations: true,
+  escalationTimeoutMinutes: 30,
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";
@@ -34,6 +37,7 @@ export const COLORS = {
   GREEN: 0x2ecc71,
   RED: 0xe74c3c,
   YELLOW: 0xf1c40f,
+  ORANGE: 0xffaa00,
   BLUE: 0x3498db,
   GRAY: 0x95a5a6,
   PURPLE: 0x9b59b6,
@@ -46,6 +50,9 @@ export const METRIC_NAMES = {
   signalsExtracted: "discord_signals_extracted",
   approvalsDecided: "discord_approvals_decided",
   gatewayReconnections: "discord_gateway_reconnections",
+  escalationsCreated: "discord_escalations_created",
+  escalationsResolved: "discord_escalations_resolved",
+  escalationsTimedOut: "discord_escalations_timed_out",
 } as const;
 
 export const ROLE_WEIGHTS: Record<string, number> = {
@@ -63,3 +70,6 @@ export const BACKFILL_MAX_MESSAGES_PER_CHANNEL = 5000;
 export const BACKFILL_PAGE_DELAY_MS = 500;
 export const BACKFILL_DEFAULT_DAYS = 90;
 export const BACKFILL_SIGNAL_CAP = 200;
+
+export const ESCALATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+export const ESCALATION_CHECK_INTERVAL_CRON = "*/5 * * * *"; // every 5 minutes

@@ -6,11 +6,13 @@ import {
   type PluginWebhookInput,
   type PluginHealthDiagnostics,
 } from "@paperclipai/plugin-sdk";
-import { WEBHOOK_KEYS } from "./constants.js";
+import { COLORS, METRIC_NAMES, WEBHOOK_KEYS } from "./constants.js";
 import {
   postEmbed,
   getApplicationId,
   registerSlashCommands,
+  type DiscordEmbed,
+  type DiscordComponent,
 } from "./discord-api.js";
 import {
   formatIssueCreated,
@@ -24,6 +26,7 @@ import { handleInteraction, SLASH_COMMANDS, type CommandContext } from "./comman
 import { runIntelligenceScan, runBackfill } from "./intelligence.js";
 import { connectGateway } from "./gateway.js";
 import { handleAcpOutput, routeMessageToAcp, createAcpThread } from "./acp-bridge.js";
+import { DiscordAdapter } from "./adapter.js";
 
 type DiscordConfig = {
   discordBotTokenRef: string;
@@ -41,7 +44,39 @@ type DiscordConfig = {
   backfillDays: number;
   paperclipBaseUrl: string;
   intelligenceRetentionDays: number;
+  escalationChannelId: string;
+  enableEscalations: boolean;
+  escalationTimeoutMinutes: number;
 };
+
+interface EscalationRecord {
+  escalationId: string;
+  companyId: string;
+  agentName: string;
+  reason: string;
+  confidenceScore?: number;
+  agentReasoning?: string;
+  conversationHistory?: Array<{ role: string; content: string }>;
+  suggestedReply?: string;
+  channelId: string;
+  messageId: string;
+  status: "pending" | "resolved" | "timed_out";
+  createdAt: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolution?: string;
+}
+
+interface EscalationCreatedPayload {
+  escalationId: string;
+  companyId: string;
+  agentName: string;
+  reason: string;
+  confidenceScore?: number;
+  agentReasoning?: string;
+  conversationHistory?: Array<{ role: string; content: string }>;
+  suggestedReply?: string;
+}
 
 async function resolveChannel(
   ctx: PluginContext,
@@ -184,6 +219,329 @@ const plugin = definePlugin({
     ctx.events.on("agent.run.finished", (event: PluginEvent) =>
       notify(event, formatAgentRunFinished, config.bdPipelineChannelId),
     );
+
+    // --- Escalation: human-in-the-loop support ---
+
+    const adapter = new DiscordAdapter(ctx, token);
+    const escalationChannelId = config.escalationChannelId || config.defaultChannelId;
+    const escalationTimeoutMs = (config.escalationTimeoutMinutes || 30) * 60 * 1000;
+
+    async function getEscalation(escalationId: string): Promise<EscalationRecord | null> {
+      const raw = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: "default",
+        stateKey: `escalation_${escalationId}`,
+      });
+      return (raw as EscalationRecord) ?? null;
+    }
+
+    async function saveEscalation(record: EscalationRecord): Promise<void> {
+      await ctx.state.set(
+        {
+          scopeKind: "company",
+          scopeId: "default",
+          stateKey: `escalation_${record.escalationId}`,
+        },
+        record,
+      );
+    }
+
+    async function trackPendingEscalation(escalationId: string): Promise<void> {
+      const raw = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: "default",
+        stateKey: "escalation_pending_ids",
+      });
+      const ids = (raw as string[]) ?? [];
+      if (!ids.includes(escalationId)) {
+        ids.push(escalationId);
+        await ctx.state.set(
+          { scopeKind: "company", scopeId: "default", stateKey: "escalation_pending_ids" },
+          ids,
+        );
+      }
+    }
+
+    async function untrackPendingEscalation(escalationId: string): Promise<void> {
+      const raw = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: "default",
+        stateKey: "escalation_pending_ids",
+      });
+      const ids = (raw as string[]) ?? [];
+      const filtered = ids.filter((id) => id !== escalationId);
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: "default", stateKey: "escalation_pending_ids" },
+        filtered,
+      );
+    }
+
+    function buildEscalationEmbed(payload: EscalationCreatedPayload): {
+      embeds: DiscordEmbed[];
+      components: DiscordComponent[];
+    } {
+      const fields: Array<{ name: string; value: string; inline?: boolean }> = [];
+      fields.push({ name: "Reason", value: payload.reason.slice(0, 1024) });
+
+      if (payload.confidenceScore !== undefined) {
+        fields.push({
+          name: "Confidence Score",
+          value: `${(payload.confidenceScore * 100).toFixed(0)}%`,
+          inline: true,
+        });
+      }
+
+      if (payload.agentReasoning) {
+        fields.push({
+          name: "Agent Reasoning",
+          value: payload.agentReasoning.slice(0, 1024),
+        });
+      }
+
+      if (payload.suggestedReply) {
+        fields.push({
+          name: "Suggested Reply",
+          value: payload.suggestedReply.slice(0, 1024),
+        });
+      }
+
+      // Build conversation history as description
+      let description: string | undefined;
+      if (payload.conversationHistory && payload.conversationHistory.length > 0) {
+        const recent = payload.conversationHistory.slice(-5);
+        const lines = recent.map((msg) => {
+          const role = msg.role === "user" ? "Customer" : msg.role === "assistant" ? "Agent" : msg.role;
+          return `**${role}:** ${msg.content.slice(0, 200)}`;
+        });
+        description = lines.join("\n\n").slice(0, 2048);
+      }
+
+      const embeds: DiscordEmbed[] = [
+        {
+          title: `Escalation from ${payload.agentName}`,
+          description,
+          color: COLORS.ORANGE,
+          fields,
+          footer: { text: "Paperclip Escalation" },
+          timestamp: new Date().toISOString(),
+        },
+      ];
+
+      const buttons: DiscordComponent[] = [];
+
+      if (payload.suggestedReply) {
+        buttons.push({
+          type: 2,
+          style: 3, // SUCCESS
+          label: "Use Suggested Reply",
+          custom_id: `esc_suggest_${payload.escalationId}`,
+        });
+      }
+
+      buttons.push(
+        {
+          type: 2,
+          style: 1, // PRIMARY
+          label: "Reply to Customer",
+          custom_id: `esc_reply_${payload.escalationId}`,
+        },
+        {
+          type: 2,
+          style: 2, // SECONDARY
+          label: "Override Agent",
+          custom_id: `esc_override_${payload.escalationId}`,
+        },
+        {
+          type: 2,
+          style: 4, // DANGER
+          label: "Dismiss",
+          custom_id: `esc_dismiss_${payload.escalationId}`,
+        },
+      );
+
+      const components: DiscordComponent[] = [
+        {
+          type: 1, // ACTION_ROW
+          components: buttons,
+        },
+      ];
+
+      return { embeds, components };
+    }
+
+    if (config.enableEscalations !== false) {
+      ctx.events.on("escalation.created", async (event: PluginEvent) => {
+        const payload = event.payload as unknown as EscalationCreatedPayload;
+        const escalationId = payload.escalationId || event.entityId;
+        payload.escalationId = escalationId;
+
+        const channelId = await resolveChannel(
+          ctx,
+          event.companyId,
+          escalationChannelId,
+        );
+        if (!channelId) return;
+
+        const { embeds, components } = buildEscalationEmbed(payload);
+        const messageId = await adapter.sendButtons(channelId, embeds, components);
+
+        if (messageId) {
+          const record: EscalationRecord = {
+            escalationId,
+            companyId: event.companyId,
+            agentName: payload.agentName,
+            reason: payload.reason,
+            confidenceScore: payload.confidenceScore,
+            agentReasoning: payload.agentReasoning,
+            conversationHistory: payload.conversationHistory,
+            suggestedReply: payload.suggestedReply,
+            channelId,
+            messageId,
+            status: "pending",
+            createdAt: new Date().toISOString(),
+          };
+          await saveEscalation(record);
+          await trackPendingEscalation(escalationId);
+          await ctx.metrics.write(METRIC_NAMES.escalationsCreated, 1);
+
+          await ctx.activity.log({
+            companyId: event.companyId,
+            message: `Escalation created by ${payload.agentName}: ${payload.reason.slice(0, 100)}`,
+            entityType: "escalation",
+            entityId: escalationId,
+          });
+
+          ctx.logger.info("Escalation posted to Discord", {
+            escalationId,
+            channelId,
+            messageId,
+          });
+        }
+      });
+    }
+
+    // --- Escalation: agent-callable tool ---
+
+    ctx.tools.register(
+      "escalate_to_human",
+      {
+        displayName: "Escalate to Human",
+        description:
+          "Escalate a conversation to a human operator via Discord. Posts an interactive embed with action buttons for human review.",
+        parametersSchema: {
+          type: "object",
+          properties: {
+            companyId: { type: "string", description: "Company ID for the escalation" },
+            agentName: { type: "string", description: "Name of the agent requesting escalation" },
+            reason: { type: "string", description: "Why the agent is escalating" },
+            confidenceScore: { type: "number", description: "Confidence score (0-1)" },
+            agentReasoning: { type: "string", description: "Internal reasoning for escalation" },
+            conversationHistory: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  role: { type: "string" },
+                  content: { type: "string" },
+                },
+              },
+              description: "Last N messages of conversation history",
+            },
+            suggestedReply: { type: "string", description: "Optional suggested reply" },
+          },
+          required: ["companyId", "agentName", "reason"],
+        },
+      },
+      async (params) => {
+        const p = params as Record<string, unknown>;
+        const escalationId = `esc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const companyId = String(p.companyId);
+
+        const payload: EscalationCreatedPayload = {
+          escalationId,
+          companyId,
+          agentName: String(p.agentName),
+          reason: String(p.reason),
+          confidenceScore: p.confidenceScore !== undefined ? Number(p.confidenceScore) : undefined,
+          agentReasoning: p.agentReasoning ? String(p.agentReasoning) : undefined,
+          conversationHistory: p.conversationHistory as Array<{ role: string; content: string }> | undefined,
+          suggestedReply: p.suggestedReply ? String(p.suggestedReply) : undefined,
+        };
+
+        ctx.events.emit("escalation.created", {
+          eventType: "escalation.created",
+          companyId,
+          entityId: escalationId,
+          payload,
+          occurredAt: new Date().toISOString(),
+        });
+
+        return {
+          content: JSON.stringify({
+            escalationId,
+            status: "pending",
+            message: "Escalation has been posted to Discord for human review.",
+          }),
+        };
+      },
+    );
+
+    // --- Escalation: timeout check job ---
+
+    ctx.jobs.register("check-escalation-timeouts", async () => {
+      const raw = await ctx.state.get({
+        scopeKind: "company",
+        scopeId: "default",
+        stateKey: "escalation_pending_ids",
+      });
+      const pendingIds = (raw as string[]) ?? [];
+      if (pendingIds.length === 0) return;
+
+      const now = Date.now();
+
+      for (const escalationId of pendingIds) {
+        const record = await getEscalation(escalationId);
+        if (!record || record.status !== "pending") {
+          await untrackPendingEscalation(escalationId);
+          continue;
+        }
+
+        const elapsed = now - new Date(record.createdAt).getTime();
+        if (elapsed < escalationTimeoutMs) continue;
+
+        record.status = "timed_out";
+        record.resolvedAt = new Date().toISOString();
+        await saveEscalation(record);
+        await untrackPendingEscalation(escalationId);
+        await ctx.metrics.write(METRIC_NAMES.escalationsTimedOut, 1);
+
+        // Update the Discord message to reflect timeout
+        await adapter.editMessage(record.channelId, record.messageId, {
+          embeds: [
+            {
+              title: `Escalation from ${record.agentName} - TIMED OUT`,
+              description: `This escalation was not resolved within ${config.escalationTimeoutMinutes || 30} minutes.`,
+              color: COLORS.RED,
+              fields: [
+                { name: "Reason", value: record.reason.slice(0, 1024) },
+              ],
+              footer: { text: "Paperclip Escalation" },
+              timestamp: record.resolvedAt,
+            },
+          ],
+          components: [],
+        });
+
+        ctx.events.emit("escalation.timed_out", {
+          escalationId,
+          companyId: record.companyId,
+          agentName: record.agentName,
+          reason: record.reason,
+        });
+
+        ctx.logger.info("Escalation timed out", { escalationId });
+      }
+    });
 
     // --- Per-company channel overrides ---
 

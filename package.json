@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@paperclipai/plugin-sdk": "workspace:*",
-    "@paperclipai/shared": "workspace:*"
+    "@paperclipai/shared": "workspace:*",
+    "@paperclipai/chat-core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

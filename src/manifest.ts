@@ -34,6 +34,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "agent.tools.register",
     "jobs.schedule",
     "events.emit",
+    "escalations.read",
+    "escalations.write",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -135,6 +137,29 @@ const manifest: PaperclipPluginManifestV1 = {
         minimum: 1,
         maximum: 365,
       },
+      escalationChannelId: {
+        type: "string",
+        title: "Escalation Channel ID",
+        description:
+          "Channel ID for human-in-the-loop escalation messages. Falls back to default channel.",
+        default: "",
+      },
+      enableEscalations: {
+        type: "boolean",
+        title: "Enable escalation support",
+        description:
+          "Allow agents to escalate conversations to humans via Discord with actionable buttons.",
+        default: true,
+      },
+      escalationTimeoutMinutes: {
+        type: "number",
+        title: "Escalation timeout (minutes)",
+        description:
+          "How long to wait for a human response before marking an escalation as timed out.",
+        default: 30,
+        minimum: 5,
+        maximum: 1440,
+      },
     },
     required: ["discordBotTokenRef", "defaultChannelId"],
   },
@@ -145,6 +170,13 @@ const manifest: PaperclipPluginManifestV1 = {
       description:
         "Periodically scan configured Discord channels for community signals (feature requests, pain points, maintainer directives).",
       schedule: "0 */6 * * *",
+    },
+    {
+      jobKey: "check-escalation-timeouts",
+      displayName: "Escalation Timeout Check",
+      description:
+        "Periodically check for escalations that have exceeded the configured timeout and mark them as timed out.",
+      schedule: "*/5 * * * *",
     },
   ],
   tools: [
@@ -172,6 +204,57 @@ const manifest: PaperclipPluginManifestV1 = {
           },
         },
         required: ["companyId"],
+      },
+    },
+    {
+      name: "escalate_to_human",
+      displayName: "Escalate to Human",
+      description:
+        "Escalate a conversation to a human operator via Discord. Posts an interactive embed with action buttons for human review.",
+      parametersSchema: {
+        type: "object",
+        properties: {
+          companyId: {
+            type: "string",
+            description: "Company ID for the escalation",
+          },
+          agentName: {
+            type: "string",
+            description: "Name of the agent requesting escalation",
+          },
+          reason: {
+            type: "string",
+            description: "Why the agent is escalating (shown to the human)",
+          },
+          confidenceScore: {
+            type: "number",
+            description:
+              "Agent's confidence score (0-1) for its last response before escalation",
+          },
+          agentReasoning: {
+            type: "string",
+            description:
+              "The agent's internal reasoning for why it cannot handle this autonomously",
+          },
+          conversationHistory: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                role: { type: "string" },
+                content: { type: "string" },
+              },
+            },
+            description:
+              "Last N messages of conversation history for context (max 5 shown)",
+          },
+          suggestedReply: {
+            type: "string",
+            description:
+              "Optional suggested reply the agent thinks might work but wants human approval for",
+          },
+        },
+        required: ["companyId", "agentName", "reason"],
       },
     },
   ],

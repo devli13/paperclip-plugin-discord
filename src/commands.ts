@@ -411,6 +411,10 @@ async function handleButtonClick(
     };
   }
 
+  if (customId.startsWith("esc_")) {
+    return handleEscalationButton(ctx, customId, actor, base);
+  }
+
   if (customId.startsWith("approval_reject_")) {
     const approvalId = customId.replace("approval_reject_", "");
     ctx.logger.info("Rejection button clicked", { approvalId, action: "reject", actor });
@@ -451,4 +455,189 @@ async function handleButtonClick(
     content: "Unknown button action.",
     ephemeral: true,
   });
+}
+
+async function handleEscalationButton(
+  ctx: PluginContext,
+  customId: string,
+  actor: string,
+  baseUrl: string,
+): Promise<unknown> {
+  // Parse: esc_{action}_{escalationId}
+  const parts = customId.split("_");
+  const action = parts[1];
+  const escalationId = parts.slice(2).join("_");
+
+  ctx.logger.info("Escalation button clicked", { escalationId, action, actor });
+
+  const record = await ctx.state.get({
+    scopeKind: "company",
+    scopeId: "default",
+    stateKey: `escalation_${escalationId}`,
+  }) as {
+    escalationId: string;
+    agentName: string;
+    reason: string;
+    suggestedReply?: string;
+    status: string;
+  } | null;
+
+  if (!record) {
+    return respondToInteraction({
+      type: 4,
+      content: `Escalation \`${escalationId}\` not found.`,
+      ephemeral: true,
+    });
+  }
+
+  if (record.status !== "pending") {
+    return respondToInteraction({
+      type: 4,
+      content: `Escalation \`${escalationId}\` has already been ${record.status}.`,
+      ephemeral: true,
+    });
+  }
+
+  switch (action) {
+    case "suggest": {
+      // Use Suggested Reply - resolve with the suggested text
+      record.status = "resolved";
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: "default", stateKey: `escalation_${escalationId}` },
+        { ...record, resolvedAt: new Date().toISOString(), resolvedBy: `discord:${actor}`, resolution: "suggested_reply" },
+      );
+      await ctx.metrics.write(METRIC_NAMES.approvalsDecided, 1);
+
+      ctx.events.emit("escalation.resolved", {
+        escalationId,
+        action: "suggested_reply",
+        resolvedBy: actor,
+        suggestedReply: record.suggestedReply,
+      });
+
+      return {
+        type: 7,
+        data: {
+          embeds: [{
+            title: `Escalation from ${record.agentName} - RESOLVED`,
+            description: `**Suggested reply accepted** by ${actor}`,
+            color: COLORS.GREEN,
+            fields: [
+              { name: "Reason", value: record.reason.slice(0, 1024) },
+              ...(record.suggestedReply ? [{ name: "Reply Used", value: record.suggestedReply.slice(0, 1024) }] : []),
+            ],
+            footer: { text: "Paperclip Escalation" },
+            timestamp: new Date().toISOString(),
+          }],
+          components: [],
+        },
+      };
+    }
+
+    case "reply": {
+      // Reply to Customer - acknowledge, the human will type a follow-up
+      record.status = "resolved";
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: "default", stateKey: `escalation_${escalationId}` },
+        { ...record, resolvedAt: new Date().toISOString(), resolvedBy: `discord:${actor}`, resolution: "human_reply" },
+      );
+      await ctx.metrics.write(METRIC_NAMES.approvalsDecided, 1);
+
+      ctx.events.emit("escalation.resolved", {
+        escalationId,
+        action: "human_reply",
+        resolvedBy: actor,
+      });
+
+      return {
+        type: 7,
+        data: {
+          embeds: [{
+            title: `Escalation from ${record.agentName} - RESOLVED`,
+            description: `**${actor}** is replying to the customer directly.`,
+            color: COLORS.GREEN,
+            fields: [
+              { name: "Reason", value: record.reason.slice(0, 1024) },
+            ],
+            footer: { text: "Paperclip Escalation" },
+            timestamp: new Date().toISOString(),
+          }],
+          components: [],
+        },
+      };
+    }
+
+    case "override": {
+      // Override Agent - human takes over
+      record.status = "resolved";
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: "default", stateKey: `escalation_${escalationId}` },
+        { ...record, resolvedAt: new Date().toISOString(), resolvedBy: `discord:${actor}`, resolution: "agent_override" },
+      );
+      await ctx.metrics.write(METRIC_NAMES.approvalsDecided, 1);
+
+      ctx.events.emit("escalation.resolved", {
+        escalationId,
+        action: "agent_override",
+        resolvedBy: actor,
+      });
+
+      return {
+        type: 7,
+        data: {
+          embeds: [{
+            title: `Escalation from ${record.agentName} - OVERRIDDEN`,
+            description: `**${actor}** has overridden the agent and taken control.`,
+            color: COLORS.GREEN,
+            fields: [
+              { name: "Reason", value: record.reason.slice(0, 1024) },
+            ],
+            footer: { text: "Paperclip Escalation" },
+            timestamp: new Date().toISOString(),
+          }],
+          components: [],
+        },
+      };
+    }
+
+    case "dismiss": {
+      // Dismiss - close without action
+      record.status = "resolved";
+      await ctx.state.set(
+        { scopeKind: "company", scopeId: "default", stateKey: `escalation_${escalationId}` },
+        { ...record, resolvedAt: new Date().toISOString(), resolvedBy: `discord:${actor}`, resolution: "dismissed" },
+      );
+      await ctx.metrics.write(METRIC_NAMES.approvalsDecided, 1);
+
+      ctx.events.emit("escalation.resolved", {
+        escalationId,
+        action: "dismissed",
+        resolvedBy: actor,
+      });
+
+      return {
+        type: 7,
+        data: {
+          embeds: [{
+            title: `Escalation from ${record.agentName} - DISMISSED`,
+            description: `Dismissed by ${actor}`,
+            color: COLORS.GRAY,
+            fields: [
+              { name: "Reason", value: record.reason.slice(0, 1024) },
+            ],
+            footer: { text: "Paperclip Escalation" },
+            timestamp: new Date().toISOString(),
+          }],
+          components: [],
+        },
+      };
+    }
+
+    default:
+      return respondToInteraction({
+        type: 4,
+        content: `Unknown escalation action: ${action}`,
+        ephemeral: true,
+      });
+  }
 }
