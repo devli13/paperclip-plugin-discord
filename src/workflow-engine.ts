@@ -181,7 +181,9 @@ async function execHttpRequest(
   }
 
   try {
-    const resp = await paperclipFetch(url, init);
+    // Use ctx.http.fetch (NOT paperclipFetch) for user-configured URLs to
+    // preserve the private-IP restriction and prevent SSRF.
+    const resp = await ctx.http.fetch(url, init);
     let data: unknown;
     const ct = resp.headers.get("content-type") ?? "";
     if (ct.includes("json")) {

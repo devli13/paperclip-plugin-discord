@@ -196,9 +196,10 @@ describe("runWorkflow — step types", () => {
     expect(result.error).toBe("Missing agentId");
   });
 
-  it("http_request makes fetch call", async () => {
+  it("http_request makes fetch call via ctx.http.fetch", async () => {
     const ctx = makeCtx();
-    mockPaperclipFetch.mockResolvedValue({
+    // http_request must use ctx.http.fetch (not paperclipFetch) to preserve private-IP restriction
+    ctx.http.fetch.mockResolvedValue({
       ok: true, status: 200,
       json: () => Promise.resolve({ data: "response" }),
       headers: { get: () => "application/json" },
@@ -212,7 +213,9 @@ describe("runWorkflow — step types", () => {
 
     const result = await runWorkflow({ ...baseOpts, ctx, workflow: wf, args: "" });
     expect(result.ok).toBe(true);
-    expect(mockPaperclipFetch).toHaveBeenCalledWith("https://example.com/api", expect.objectContaining({ method: "POST" }));
+    expect(ctx.http.fetch).toHaveBeenCalledWith("https://example.com/api", expect.objectContaining({ method: "POST" }));
+    // paperclipFetch must NOT be used for user-controlled URLs
+    expect(mockPaperclipFetch).not.toHaveBeenCalledWith("https://example.com/api", expect.anything());
   });
 
   it("http_request fails without url", async () => {

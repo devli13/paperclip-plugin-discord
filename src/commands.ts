@@ -1,7 +1,7 @@
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { type DiscordEmbed, respondToInteraction } from "./discord-api.js";
 import { COLORS, METRIC_NAMES } from "./constants.js";
-import { withRetry } from "./retry.js";
+import { withRetry, throwOnRetryableStatus } from "./retry.js";
 import { paperclipFetch } from "./paperclip-fetch.js";
 import { handleHandoffButton, handleDiscussionButton, handleAcpCommand } from "./session-registry.js";
 import { resolveCompanyId } from "./company-resolver.js";
@@ -440,13 +440,19 @@ async function handleApprove(
 
   try {
     const url = `${baseUrl ?? "http://localhost:3100"}/api/approvals/${approvalId}/approve`;
-    await withRetry(() =>
-      paperclipFetch(url, {
+    const resp = await withRetry(async () => {
+      const r = await paperclipFetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decidedByUserId: `discord:${username ?? "unknown"}` }),
-      }),
-    );
+      });
+      throwOnRetryableStatus(r);
+      return r;
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`API ${resp.status}: ${body}`);
+    }
 
     await ctx.metrics.write(METRIC_NAMES.approvalsDecided, 1);
     ctx.logger.info("Approval via Discord", { approvalId, username });
@@ -864,13 +870,15 @@ async function handleButtonClick(
     ctx.logger.info("Approval button clicked", { approvalId, action: "approve", actor });
 
     try {
-      const resp = await withRetry(() =>
-        paperclipFetch(`${base}/api/approvals/${approvalId}/approve`, {
+      const resp = await withRetry(async () => {
+        const r = await paperclipFetch(`${base}/api/approvals/${approvalId}/approve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ decidedByUserId: `discord:${actor}` }),
-        }),
-      );
+        });
+        throwOnRetryableStatus(r);
+        return r;
+      });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "");
         throw new Error(`API ${resp.status}: ${body}`);
@@ -913,13 +921,15 @@ async function handleButtonClick(
     ctx.logger.info("Rejection button clicked", { approvalId, action: "reject", actor });
 
     try {
-      const resp = await withRetry(() =>
-        paperclipFetch(`${base}/api/approvals/${approvalId}/reject`, {
+      const resp = await withRetry(async () => {
+        const r = await paperclipFetch(`${base}/api/approvals/${approvalId}/reject`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ decidedByUserId: `discord:${actor}` }),
-        }),
-      );
+        });
+        throwOnRetryableStatus(r);
+        return r;
+      });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "");
         throw new Error(`API ${resp.status}: ${body}`);

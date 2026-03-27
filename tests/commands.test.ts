@@ -2,13 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleInteraction, SLASH_COMMANDS, type CommandContext } from "../src/commands.js";
 import { COLORS } from "../src/constants.js";
 
-const mockPaperclipFetch = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve("") });
+const mockPaperclipFetch = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), text: () => Promise.resolve("") });
 vi.mock("../src/paperclip-fetch.js", () => ({
   paperclipFetch: (...args: unknown[]) => mockPaperclipFetch(...args),
 }));
 
 beforeEach(() => {
-  mockPaperclipFetch.mockReset().mockResolvedValue({ ok: true, text: () => Promise.resolve("") });
+  mockPaperclipFetch.mockReset().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), text: () => Promise.resolve("") });
 });
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -289,17 +289,18 @@ describe("button clicks", () => {
   });
 
   it("shows failure when API returns non-ok status", async () => {
-    mockPaperclipFetch.mockResolvedValueOnce({
+    mockPaperclipFetch.mockResolvedValue({
       ok: false,
-      status: 500,
-      text: () => Promise.resolve("Internal Server Error"),
+      status: 403,
+      headers: new Headers(),
+      text: () => Promise.resolve("Forbidden"),
     });
     const ctx = makeCtx();
     const result = await handleInteraction(
       ctx,
       {
         type: 3,
-        data: { name: "button", custom_id: "approval_approve_apr-500" },
+        data: { name: "button", custom_id: "approval_approve_apr-403" },
         member: { user: { username: "clicker" } },
       },
       defaultCmdCtx,
@@ -307,7 +308,7 @@ describe("button clicks", () => {
 
     expect(result.type).toBe(7);
     expect(result.data.embeds[0].title).toBe("Approval Failed");
-    expect(result.data.embeds[0].description).toContain("API 500");
+    expect(result.data.embeds[0].description).toContain("API 403");
   });
 });
 
