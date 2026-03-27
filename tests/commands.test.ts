@@ -154,6 +154,30 @@ describe("/clip approve", () => {
     );
     expect(result.data.embeds[0].color).toBe(COLORS.GREEN);
   });
+
+  it("returns error when API returns non-OK status (Bug 1 regression)", async () => {
+    mockPaperclipFetch.mockResolvedValue({
+      ok: false,
+      status: 422,
+      headers: new Headers(),
+      text: () => Promise.resolve("Unprocessable Entity"),
+    });
+    const ctx = makeCtx();
+    const result = await handleInteraction(
+      ctx,
+      {
+        type: 2,
+        data: { name: "clip", options: [{ name: "approve", options: [{ name: "id", value: "apr-bad" }] }] },
+        member: { user: { username: "testuser" } },
+      },
+      defaultCmdCtx,
+    ) as any;
+
+    expect(result.type).toBe(4);
+    expect(result.data.content).toContain("Failed to approve");
+    expect(result.data.content).toContain("API 422");
+    expect(result.data.flags).toBe(64); // ephemeral
+  });
 });
 
 describe("/clip budget", () => {
