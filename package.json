@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-discord",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "main": "./dist/index.js",
   "paperclipPlugin": {
@@ -26,5 +26,9 @@
   },
   "files": [
     "dist/"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvanhorn/paperclip-plugin-discord"
+  }
 }
