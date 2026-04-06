@@ -93,6 +93,8 @@ type DiscordConfig = {
   tridailyTimes: string;
 };
 
+type IssueNotificationPayload = Record<string, unknown>;
+
 // EscalationRecord is imported from ./escalation-state.js
 
 interface EscalationCreatedPayload {
@@ -117,6 +119,116 @@ async function resolveChannel(
     stateKey: "discord-channel",
   });
   return (override as string) ?? fallback ?? null;
+}
+
+async function enrichIssueNotificationPayload(
+  ctx: PluginContext,
+  event: PluginEvent,
+): Promise<IssueNotificationPayload> {
+  const payload = { ...(event.payload as IssueNotificationPayload) };
+  if (event.entityType !== "issue" || !event.entityId) return payload;
+
+  try {
+    const companyId = await resolveIssueCompanyIdForNotification(ctx, event, payload);
+    if (!companyId) return payload;
+
+    const issue = await ctx.issues.get(event.entityId, companyId) as {
+      id: string;
+      identifier?: string | null;
+      title?: string | null;
+      description?: string | null;
+      status?: string | null;
+      priority?: string | null;
+      assigneeAgentId?: string | null;
+      assigneeUserId?: string | null;
+      executionAgentNameKey?: string | null;
+      completedAt?: Date | string | null;
+      updatedAt?: Date | string | null;
+      project?: { name?: string | null } | null;
+    } | null;
+
+    if (issue) {
+      if (payload.identifier == null) payload.identifier = issue.identifier ?? issue.id;
+      if (payload.title == null) payload.title = issue.title ?? issue.identifier ?? issue.id;
+      if (payload.description == null) payload.description = issue.description;
+      if (payload.status == null) payload.status = issue.status;
+      if (payload.priority == null) payload.priority = issue.priority;
+      if (payload.assigneeAgentId == null) payload.assigneeAgentId = issue.assigneeAgentId;
+      if (payload.assigneeUserId == null) payload.assigneeUserId = issue.assigneeUserId;
+      if (payload.agentName == null) payload.agentName = issue.executionAgentNameKey;
+      if (payload.completedAt == null && issue.completedAt) payload.completedAt = String(issue.completedAt);
+      if (payload.updatedAt == null && issue.updatedAt) payload.updatedAt = String(issue.updatedAt);
+      if (payload.projectName == null && issue.project?.name) payload.projectName = issue.project.name;
+    }
+
+    if (String(payload.status ?? "") === "done") {
+      const comments = await ctx.issues.listComments(event.entityId, companyId) as Array<{
+        authorAgentId?: string | null;
+        authorUserId?: string | null;
+        body: string;
+        createdAt?: Date | string;
+        updatedAt?: Date | string;
+      }>;
+      if (comments.length > 0) {
+        const lastComment = [...comments].sort((a, b) => {
+          const aTs = new Date(String(a.updatedAt ?? a.createdAt ?? 0)).getTime();
+          const bTs = new Date(String(b.updatedAt ?? b.createdAt ?? 0)).getTime();
+          return bTs - aTs;
+        })[0];
+        if (payload.lastComment == null) payload.lastComment = lastComment.body;
+        if (payload.completedBy == null) {
+          if (lastComment.authorUserId) {
+            payload.completedBy = lastComment.authorUserId.startsWith("discord:")
+              ? lastComment.authorUserId
+              : "Board user";
+          } else if (lastComment.authorAgentId) {
+            payload.completedBy = payload.agentName ?? "Agent";
+          }
+        }
+      }
+
+      if (payload.completedBy == null) {
+        if (typeof payload.assigneeUserId === "string") {
+          payload.completedBy = payload.assigneeUserId.startsWith("discord:")
+            ? payload.assigneeUserId
+            : "Board user";
+        } else {
+          payload.completedBy = payload.agentName ?? payload.assigneeAgentId ?? null;
+        }
+      }
+    }
+  } catch (error) {
+    ctx.logger.debug("Issue notification enrichment failed", {
+      issueId: event.entityId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return payload;
+}
+
+async function resolveIssueCompanyIdForNotification(
+  ctx: PluginContext,
+  event: PluginEvent,
+  payload: IssueNotificationPayload,
+): Promise<string | null> {
+  const candidates = [
+    typeof event.companyId === "string" ? event.companyId : null,
+    typeof payload.companyId === "string" ? payload.companyId : null,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const companyId of candidates) {
+    const issue = await ctx.issues.get(event.entityId!, companyId);
+    if (issue) return companyId;
+  }
+
+  const companies = await ctx.companies.list();
+  for (const company of companies) {
+    const issue = await ctx.issues.get(event.entityId!, company.id);
+    if (issue) return company.id;
+  }
+
+  return candidates[0] ?? null;
 }
 
 const plugin = definePlugin({
@@ -375,9 +487,27 @@ const plugin = definePlugin({
 
     if (config.notifyOnIssueDone) {
       ctx.events.on("issue.updated", async (event: PluginEvent) => {
-        const payload = event.payload as Record<string, unknown>;
+        const payload = await enrichIssueNotificationPayload(ctx, event);
         if (payload.status !== "done") return;
-        await notify(event, formatIssueDone);
+
+        const completionMarker = String(payload.completedAt ?? "");
+        if (completionMarker) {
+          const stateKey = `issue_done_notified_${event.entityId}`;
+          const previousMarker = await ctx.state.get({
+            scopeKind: "instance",
+            stateKey,
+          }) as string | null;
+          if (previousMarker === completionMarker) {
+            ctx.logger.debug(`Skipping duplicate completion notification for ${event.entityId}`);
+            return;
+          }
+          await ctx.state.set(
+            { scopeKind: "instance", stateKey },
+            completionMarker,
+          );
+        }
+
+        await notify({ ...event, payload }, formatIssueDone);
       });
     }
 
