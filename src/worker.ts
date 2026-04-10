@@ -590,20 +590,21 @@ const plugin = definePlugin({
       ];
 
       const buttons: DiscordComponent[] = [];
+      const cid = payload.companyId || "default";
 
       if (payload.suggestedReply) {
         buttons.push({
           type: 2,
           style: 3,
           label: "Use Suggested Reply",
-          custom_id: `esc_suggest_${payload.escalationId}`,
+          custom_id: `esc_suggest_${cid}_${payload.escalationId}`,
         });
       }
 
       buttons.push(
-        { type: 2, style: 1, label: "Reply to Customer", custom_id: `esc_reply_${payload.escalationId}` },
-        { type: 2, style: 2, label: "Override Agent", custom_id: `esc_override_${payload.escalationId}` },
-        { type: 2, style: 4, label: "Dismiss", custom_id: `esc_dismiss_${payload.escalationId}` },
+        { type: 2, style: 1, label: "Reply to Customer", custom_id: `esc_reply_${cid}_${payload.escalationId}` },
+        { type: 2, style: 2, label: "Override Agent", custom_id: `esc_override_${cid}_${payload.escalationId}` },
+        { type: 2, style: 4, label: "Dismiss", custom_id: `esc_dismiss_${cid}_${payload.escalationId}` },
       );
 
       const components: DiscordComponent[] = [{ type: 1, components: buttons }];
