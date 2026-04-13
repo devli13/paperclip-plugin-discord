@@ -1354,14 +1354,25 @@ async function handleEscalationButton(
   actor: string,
   _baseUrl: string,
 ): Promise<unknown> {
+  // Button custom_id format: esc_{action}_{companyId}_{escalationId}
+  // Legacy format (pre-fix): esc_{action}_{escalationId}
+  // CompanyId is a UUID (contains hyphens), escalationId starts with "esc_".
+  // We split on "_" to get the action, then look for a UUID-shaped segment.
   const parts = customId.split("_");
   const action = parts[1];
-  const escalationId = parts.slice(2).join("_");
+  const remaining = parts.slice(2).join("_");
 
-  ctx.logger.info("Escalation button clicked", { escalationId, action, actor });
+  // Try to extract embedded companyId: UUID pattern before the escalation ID
+  const uuidEscMatch = remaining.match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_(esc_.+)$/i,
+  );
+  const embeddedCompanyId = uuidEscMatch ? uuidEscMatch[1] : null;
+  const escalationId = uuidEscMatch ? uuidEscMatch[2] : remaining;
 
-  const resolvedCompanyId = await resolveCompanyId(ctx);
-  const record = await getEscalation(ctx, escalationId, resolvedCompanyId) as {
+  ctx.logger.info("Escalation button clicked", { escalationId, action, actor, embeddedCompanyId });
+
+  const companyIdForLookup = embeddedCompanyId ?? await resolveCompanyId(ctx);
+  const record = await getEscalation(ctx, escalationId, companyIdForLookup) as {
     escalationId: string; companyId: string; agentName: string;
     reason: string; suggestedReply?: string; status: string;
   } | null;
