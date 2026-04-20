@@ -92,6 +92,22 @@ type DiscordConfig = {
   dailyDigestTime: string;
   bidailySecondTime: string;
   tridailyTimes: string;
+  /**
+   * Per-company channel overrides. Keys are Paperclip company UUIDs; values are
+   * Discord channel IDs. When a plugin install serves multiple companies, each
+   * event type routes to the company-specific channel listed here; if a
+   * company is not mapped, the event falls back to the default/global channel.
+   *
+   * Example:
+   *   { "3060c8cb-...": "1490608926423646298", "4427f9e2-...": "1490610083728588950" }
+   */
+  companyChannels?: Record<string, string>;
+  /**
+   * Per-company approval channel overrides. Checked specifically for
+   * `approval.created` events before `companyChannels`. Use this when
+   * different companies have dedicated approvals channels.
+   */
+  approvalsChannels?: Record<string, string>;
 };
 
 type IssueNotificationPayload = Record<string, unknown>;
@@ -128,13 +144,35 @@ async function resolveChannel(
   ctx: PluginContext,
   companyId: string,
   fallback: unknown,
+  channelMap?: Record<string, string>,
 ): Promise<string | null> {
+  // 1. Explicit state override via `/clip connect-channel` (per-company set at runtime).
   const override = await ctx.state.get({
     scopeKind: "company",
     scopeId: companyId,
     stateKey: "discord-channel",
   });
-  return normalizeDiscordId(override) ?? normalizeDiscordId(fallback);
+  if (override) return normalizeDiscordId(override);
+
+  // 2. Event-type-specific per-company map passed by the caller (e.g. approvalsChannels).
+  if (channelMap && companyId && channelMap[companyId]) {
+    return normalizeDiscordId(channelMap[companyId]);
+  }
+
+  // 3. General `companyChannels` map from plugin config — applies to every event type
+  //    that does not have its own specific map.
+  try {
+    const rawConfig = (await ctx.config.get?.()) as DiscordConfig | undefined;
+    const general = rawConfig?.companyChannels;
+    if (general && companyId && general[companyId]) {
+      return normalizeDiscordId(general[companyId]);
+    }
+  } catch {
+    // ctx.config.get may not be available in some SDK versions — fall through silently.
+  }
+
+  // 4. Fall back to whatever the caller passed (topicChannel | overrideChannelId | default).
+  return normalizeDiscordId(fallback);
 }
 
 async function enrichIssueNotificationPayload(
@@ -479,6 +517,7 @@ const plugin = definePlugin({
       event: PluginEvent,
       formatter: (e: PluginEvent, baseUrl?: string) => ReturnType<typeof formatIssueCreated>,
       overrideChannelId?: string,
+      channelMap?: Record<string, string>,
     ) => {
       if (isDuplicate(event.eventId)) {
         ctx.logger.debug(`Skipping duplicate event ${event.eventType} (${event.eventId})`);
@@ -486,7 +525,7 @@ const plugin = definePlugin({
       }
 
       const topicChannel = overrideChannelId ? null : await resolveTopicChannel(event);
-      const channelId = await resolveChannel(ctx, event.companyId, topicChannel || overrideChannelId || config.defaultChannelId);
+      const channelId = await resolveChannel(ctx, event.companyId, topicChannel || overrideChannelId || config.defaultChannelId, channelMap);
       if (!channelId) return;
 
       const message = formatter(event, baseUrl);
@@ -550,7 +589,12 @@ const plugin = definePlugin({
 
     if (config.notifyOnApprovalCreated) {
       ctx.events.on("approval.created", (event: PluginEvent) =>
-        notify(event, formatApprovalCreated, approvalsChannelId ?? undefined),
+        notify(
+          event,
+          formatApprovalCreated,
+          approvalsChannelId ?? undefined,
+          config.approvalsChannels,
+        ),
       );
     }
 
