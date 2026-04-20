@@ -42,6 +42,8 @@ export const DEFAULT_CONFIG = {
   dailyDigestTime: "09:00",
   bidailySecondTime: "17:00",
   tridailyTimes: "07:00,13:00,19:00",
+  companyChannels: {} as Record<string, string>,
+  approvalsChannels: {} as Record<string, string>,
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";

@@ -81,6 +81,22 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Channel ID for approval requests. Falls back to default channel.",
         default: DEFAULT_CONFIG.approvalsChannelId,
       },
+      companyChannels: {
+        type: "object",
+        title: "Per-company channel overrides",
+        description:
+          "Route notifications per Paperclip company. Keys are company UUIDs, values are Discord channel IDs. Applied to every event type that does not have a more specific map. Falls through to the default/global channel when a company is not listed.",
+        additionalProperties: { type: "string" },
+        default: DEFAULT_CONFIG.companyChannels,
+      },
+      approvalsChannels: {
+        type: "object",
+        title: "Per-company approvals channel overrides",
+        description:
+          "Route approval.created events to a specific channel per company. Keys are company UUIDs, values are Discord channel IDs. Checked before companyChannels; falls through to approvalsChannelId (global) when unset.",
+        additionalProperties: { type: "string" },
+        default: DEFAULT_CONFIG.approvalsChannels,
+      },
       errorsChannelId: {
         type: "string",
         title: "Errors Channel ID",
