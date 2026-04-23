@@ -18,6 +18,8 @@ interface QueuedItem {
 interface Queue {
   items: QueuedItem[];
   running: boolean;
+  /** Set when items are enqueued so drain() can honor it per-item. */
+  staleSeconds?: number;
 }
 
 const queues = new Map<string, Queue>();
@@ -62,6 +64,9 @@ export async function enqueueForContext(
   }
 
   q.items.push(item);
+  // Remember staleSeconds on the queue itself so drain() can honor it at
+  // execution time, not just at enqueue time (codex M1 finding).
+  if (options.staleSeconds) q.staleSeconds = options.staleSeconds;
 
   if (!q.running) {
     // Kick off drain. Do not await — this is fire-and-forget so the caller
@@ -82,6 +87,17 @@ async function drain(ctx: PluginContext, key: string): Promise<void> {
   try {
     while (q.items.length > 0) {
       const next = q.items.shift()!;
+      // Stale check AT DRAIN TIME, not just at enqueue. If the item has been
+      // sitting while a prior run took minutes to finish, skip it.
+      if (q.staleSeconds && Date.now() - next.enqueuedAt > q.staleSeconds * 1000) {
+        ctx.logger.info("[message-queue] skipping stale item at drain", {
+          key,
+          id: next.id,
+          ageSeconds: Math.round((Date.now() - next.enqueuedAt) / 1000),
+          staleSeconds: q.staleSeconds,
+        });
+        continue;
+      }
       try {
         await next.run();
       } catch (err) {

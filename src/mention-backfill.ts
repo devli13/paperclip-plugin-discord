@@ -63,9 +63,13 @@ export interface BackfillOptions {
 const STATE_KEY_SEEN = (guildId: string, channelId: string): string =>
   `backfill_seen_${guildId}_${channelId}`;
 
-const STATE_KEY_PROCESSED = "backfill_processed_ids_v1";
-
-const PROCESSED_SET_MAX = 2000; // cap to keep memory reasonable
+// devli13 fork — M2 fix. Previously a single `backfill_processed_ids_v1`
+// array was read-modify-written, creating lost-update races between live
+// routing and backfill sweeps. Replaced with per-ID keys (`backfill_processed_<id>`)
+// so each write is atomic at the state-store level. We also moved the
+// hot-path claim for live/backfill deduplication to `mention_claim_<id>`
+// keys (see claimMessageForRouting).
+const STATE_KEY_PROCESSED_PREFIX = "backfill_processed_";
 
 async function discordApi(
   ctx: PluginContext,
@@ -95,61 +99,137 @@ async function discordApi(
   return res.json();
 }
 
+function snowflakeToMs(id: string): number {
+  return Number(BigInt(id) >> 22n) + 1420070400000;
+}
+
 async function fetchChannelMessagesAfter(
   ctx: PluginContext,
   token: string,
   channelId: string,
   afterId: string | null,
   max: number,
+  cutoffMs: number,
 ): Promise<BackfillMessage[]> {
-  // Discord returns newest-first. We want chronological, so we fetch pages
-  // using `after` (which returns messages newer than the cursor) and build
-  // the full list up to `max`.
+  // devli13 fork — Phase 3 bug fix. Previously, on cold start (afterId=null)
+  // this function fetched the most recent 100 messages and watermarked past
+  // any older unseen mentions. If the bot was offline during a busy period
+  // longer than 100 messages, those mentions were silently skipped forever.
+  //
+  // New behavior:
+  //   - If watermark exists: forward-paginate with `after` as before.
+  //   - If no watermark: backward-paginate with `before`, collecting until
+  //     we hit the cutoff time or max-per-channel cap. Then sort oldest-first.
+  if (afterId) {
+    return fetchForward(ctx, token, channelId, afterId, max);
+  }
+  return fetchBackwardUntilCutoff(ctx, token, channelId, max, cutoffMs);
+}
+
+async function fetchForward(
+  ctx: PluginContext,
+  token: string,
+  channelId: string,
+  afterId: string,
+  max: number,
+): Promise<BackfillMessage[]> {
   const all: BackfillMessage[] = [];
-  let cursor = afterId;
+  let cursor: string = afterId;
   while (all.length < max) {
     const take = Math.min(100, max - all.length);
-    const qs = new URLSearchParams({ limit: String(take) });
-    if (cursor) qs.set("after", cursor);
-    else qs.set("limit", "100"); // default to most-recent first page
+    const qs = new URLSearchParams({ limit: String(take), after: cursor });
     const data = (await discordApi(
       ctx,
       token,
       `/channels/${channelId}/messages?${qs.toString()}`,
     )) as BackfillMessage[] | null;
     if (!data || data.length === 0) break;
-    // Discord returns newest-first by default. We want oldest-first.
     const sorted = [...data].sort((a, b) => a.id.localeCompare(b.id));
-    for (const m of sorted) {
-      all.push(m);
-    }
-    if (data.length < take) break; // no more pages
+    for (const m of sorted) all.push(m);
+    if (data.length < take) break;
     cursor = sorted[sorted.length - 1].id;
   }
   return all;
 }
 
-async function loadProcessedIds(ctx: PluginContext): Promise<Set<string>> {
-  const raw = (await ctx.state.get({ scopeKind: "instance", stateKey: STATE_KEY_PROCESSED })) as
-    | string[]
-    | null;
-  return new Set(Array.isArray(raw) ? raw : []);
+async function fetchBackwardUntilCutoff(
+  ctx: PluginContext,
+  token: string,
+  channelId: string,
+  max: number,
+  cutoffMs: number,
+): Promise<BackfillMessage[]> {
+  // Paginate newest→oldest with `before`, stop when we hit the cutoff or max.
+  const all: BackfillMessage[] = [];
+  let cursor: string | null = null;
+  while (all.length < max) {
+    const take = Math.min(100, max - all.length);
+    const qs = new URLSearchParams({ limit: String(take) });
+    if (cursor) qs.set("before", cursor);
+    const data = (await discordApi(
+      ctx,
+      token,
+      `/channels/${channelId}/messages?${qs.toString()}`,
+    )) as BackfillMessage[] | null;
+    if (!data || data.length === 0) break;
+    // Discord returns newest-first. Each page is newer→older.
+    for (const m of data) all.push(m);
+    const oldestInPage = data[data.length - 1];
+    cursor = oldestInPage.id;
+    if (snowflakeToMs(oldestInPage.id) < cutoffMs) break;
+    if (data.length < take) break;
+  }
+  // Sort oldest→newest for the caller (so the mention processing order matches
+  // real chronology: earliest missed mention processed first).
+  all.sort((a, b) => a.id.localeCompare(b.id));
+  return all;
 }
 
-async function saveProcessedIds(ctx: PluginContext, set: Set<string>): Promise<void> {
-  // Cap to most recent N entries by ID (snowflakes sort chronologically).
-  const arr = Array.from(set).sort();
-  const capped = arr.slice(-PROCESSED_SET_MAX);
-  await ctx.state.set({ scopeKind: "instance", stateKey: STATE_KEY_PROCESSED }, capped);
+async function isProcessed(ctx: PluginContext, messageId: string): Promise<boolean> {
+  const v = await ctx.state.get({
+    scopeKind: "instance",
+    stateKey: `${STATE_KEY_PROCESSED_PREFIX}${messageId}`,
+  });
+  return v != null;
+}
+
+async function setProcessed(ctx: PluginContext, messageId: string): Promise<void> {
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: `${STATE_KEY_PROCESSED_PREFIX}${messageId}` },
+    { processedAt: Date.now() },
+  );
 }
 
 export async function markProcessed(
   ctx: PluginContext,
   messageId: string,
 ): Promise<void> {
-  const set = await loadProcessedIds(ctx);
-  set.add(messageId);
-  await saveProcessedIds(ctx, set);
+  await setProcessed(ctx, messageId);
+  // Also write the per-ID claim key so the live/backfill race has a fast check.
+  await ctx.state.set(
+    { scopeKind: "instance", stateKey: `mention_claim_${messageId}` },
+    { claimedAt: Date.now() },
+  );
+}
+
+/**
+ * Atomic "claim" of a message for routing. Returns true if this caller wins
+ * the claim (go ahead and route), false if another path (live or backfill)
+ * has already claimed it (skip).
+ *
+ * This closes the live-vs-backfill double-routing race codex flagged: if a
+ * user mentions the bot while a backfill sweep is running, only one of the
+ * two paths will actually invoke the agent.
+ */
+export async function claimMessageForRouting(
+  ctx: PluginContext,
+  messageId: string,
+): Promise<boolean> {
+  const key = `mention_claim_${messageId}`;
+  const existing = await ctx.state.get({ scopeKind: "instance", stateKey: key });
+  if (existing) return false;
+  await ctx.state.set({ scopeKind: "instance", stateKey: key }, { claimedAt: Date.now() });
+  return true;
 }
 
 /**
@@ -188,7 +268,6 @@ export async function backfillMissedMentions(
     }
   }
 
-  const processed = await loadProcessedIds(ctx);
   const cutoffMs = Date.now() - maxHours * 60 * 60 * 1000;
 
   let totalScanned = 0;
@@ -209,6 +288,7 @@ export async function backfillMissedMentions(
         channelId,
         afterId ?? null,
         maxMessagesPerChannel,
+        cutoffMs,
       );
     } catch (err) {
       ctx.logger.warn("[backfill] fetch failed for channel", {
@@ -221,12 +301,10 @@ export async function backfillMissedMentions(
     totalScanned += messages.length;
     if (messages.length === 0) continue;
 
-    // Apply cutoff: skip anything older than maxHours. Snowflake IDs embed
-    // timestamps; Discord timestamp is (snowflake >> 22) + 1420070400000.
-    const eligible = messages.filter((m) => {
-      const ms = Number(BigInt(m.id) >> 22n) + 1420070400000;
-      return ms >= cutoffMs;
-    });
+    // Apply cutoff: skip anything older than maxHours. (Cold-start backward
+    // pagination already stops at cutoff, but the forward path might include
+    // anything ≥ the old watermark, so re-filter defensively.)
+    const eligible = messages.filter((m) => snowflakeToMs(m.id) >= cutoffMs);
 
     // Build set of message IDs that have an explicit bot reply.
     const addressed = new Set<string>();
@@ -244,19 +322,30 @@ export async function backfillMissedMentions(
       if (m.author.bot || m.author.id === botUserId) continue;
       const mentionsBot = (m.mentions ?? []).some((u) => u.id === botUserId);
       if (!mentionsBot) continue;
-      if (processed.has(m.id)) {
+      if (await isProcessed(ctx, m.id)) {
         totalSkipped++;
         continue;
       }
       if (addressed.has(m.id)) {
         // Strict: has a reply-referenced bot response. Treat as handled.
-        processed.add(m.id); // cache so we skip quickly next time
+        await setProcessed(ctx, m.id); // cache so we skip quickly next time
+        totalSkipped++;
+        continue;
+      }
+      // devli13 fork — atomic claim. If live gateway already routed this
+      // message while we were scanning, the claim fails and we skip.
+      const claimed = await claimMessageForRouting(ctx, m.id);
+      if (!claimed) {
+        ctx.logger.info("[backfill] message already claimed by live path", {
+          messageId: m.id,
+        });
+        await setProcessed(ctx, m.id);
         totalSkipped++;
         continue;
       }
       try {
         await enqueue(m);
-        processed.add(m.id);
+        await setProcessed(ctx, m.id);
         totalEnqueued++;
       } catch (err) {
         ctx.logger.warn("[backfill] enqueue failed", {
@@ -272,8 +361,6 @@ export async function backfillMissedMentions(
       await ctx.state.set({ scopeKind: "instance", stateKey: seenKey }, latest);
     }
   }
-
-  await saveProcessedIds(ctx, processed);
 
   ctx.logger.info("[backfill] scan complete", {
     scanned: totalScanned,

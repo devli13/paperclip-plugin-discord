@@ -1,5 +1,5 @@
 export const PLUGIN_ID = "paperclip-plugin-discord";
-export const PLUGIN_VERSION = "0.7.3";
+export const PLUGIN_VERSION = "0.9.2";
 
 export const WEBHOOK_KEYS = {
   discordInteractions: "discord-interactions",
@@ -72,6 +72,11 @@ export const DEFAULT_CONFIG = {
   backfillMaxMessagesPerChannel: 300,
   // Channels to scan. Empty = all text + announcement channels in defaultGuildId.
   backfillChannelIds: [] as string[],
+  // Explicit guild→company mapping for mention/DM routing in multi-company
+  // deployments. Keys are Discord guild IDs; values are Paperclip company
+  // UUIDs. Consulted after config.mentionCompanyId. When neither is set,
+  // mention routing refuses to invoke (safer than guessing).
+  guildCompanies: {} as Record<string, string>,
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";

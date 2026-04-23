@@ -277,6 +277,92 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Digest times for tridaily mode (comma-separated HH:MM UTC)",
         default: DEFAULT_CONFIG.tridailyTimes,
       },
+      // ---------- devli13 fork additions ----------
+      enableFreeFormMentions: {
+        type: "boolean",
+        title: "Route free-form @mentions to an agent",
+        description:
+          "When enabled, any message in a channel that @mentions the bot is routed to the configured mention agent. Requires mentionAgentId and either mentionCompanyId or guildCompanies.",
+        default: DEFAULT_CONFIG.enableFreeFormMentions,
+      },
+      enableDirectMessages: {
+        type: "boolean",
+        title: "Route bot DMs to an agent",
+        description:
+          "When enabled, DMs to the bot are routed to the DM agent. Adds the DIRECT_MESSAGES gateway intent.",
+        default: DEFAULT_CONFIG.enableDirectMessages,
+      },
+      mentionAgentId: {
+        type: "string",
+        title: "Agent that handles @mentions",
+        description: "Agent UUID that receives free-form @mentions.",
+        default: DEFAULT_CONFIG.mentionAgentId,
+      },
+      dmAgentId: {
+        type: "string",
+        title: "Agent that handles DMs",
+        description:
+          "Agent UUID that receives direct messages. If blank, falls back to mentionAgentId.",
+        default: DEFAULT_CONFIG.dmAgentId,
+      },
+      mentionCompanyId: {
+        type: "string",
+        title: "Company UUID for mention routing",
+        description:
+          "Paperclip company UUID to invoke the mention/DM agent under. For multi-guild installs, prefer guildCompanies.",
+        default: DEFAULT_CONFIG.mentionCompanyId,
+      },
+      guildCompanies: {
+        type: "object",
+        title: "Per-guild company mapping for mention routing",
+        description:
+          "Keys are Discord guild IDs; values are Paperclip company UUIDs. Consulted after mentionCompanyId when the mention was sent in a guild.",
+        additionalProperties: { type: "string" },
+        default: DEFAULT_CONFIG.guildCompanies,
+      },
+      messageQueueMaxDepth: {
+        type: "number",
+        title: "Per-context queue max depth",
+        description:
+          "Maximum queued inbound messages per (guild, channel) before additional messages are dropped.",
+        default: DEFAULT_CONFIG.messageQueueMaxDepth,
+      },
+      messageQueueStaleSeconds: {
+        type: "number",
+        title: "Queue stale threshold (seconds)",
+        description:
+          "Queued messages older than this are dropped at both enqueue and drain time.",
+        default: DEFAULT_CONFIG.messageQueueStaleSeconds,
+      },
+      enableMentionBackfill: {
+        type: "boolean",
+        title: "Backfill mentions missed during downtime",
+        description:
+          "On plugin activation, sweep configured channels for @mentions that were sent while the bot was offline and route them through the normal queue.",
+        default: DEFAULT_CONFIG.enableMentionBackfill,
+      },
+      backfillMaxHours: {
+        type: "number",
+        title: "Backfill lookback (hours)",
+        description:
+          "Maximum age of a mention considered for backfill. Older messages are ignored.",
+        default: DEFAULT_CONFIG.backfillMaxHours,
+      },
+      backfillMaxMessagesPerChannel: {
+        type: "number",
+        title: "Backfill cap per channel",
+        description:
+          "Safety cap on messages fetched per channel during a backfill sweep.",
+        default: DEFAULT_CONFIG.backfillMaxMessagesPerChannel,
+      },
+      backfillChannelIds: {
+        type: "array",
+        title: "Channels to include in backfill",
+        description:
+          "Discord channel IDs to scan during backfill. Empty = all text + announcement channels in defaultGuildId.",
+        items: { type: "string" },
+        default: DEFAULT_CONFIG.backfillChannelIds,
+      },
     },
     required: ["discordBotTokenRef", "defaultChannelId"],
   },

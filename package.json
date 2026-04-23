@@ -1,6 +1,6 @@
 {
   "name": "@devli13/paperclip-plugin-discord",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Fork of paperclip-plugin-discord by @mvanhorn. Adds free-form @mention routing, DM support, and a serialized per-context message queue so agents can respond to community conversation end-to-end in Discord.",
   "type": "module",
   "main": "./dist/index.js",
