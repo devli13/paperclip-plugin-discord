@@ -54,6 +54,8 @@ export interface BackfillOptions {
   maxHours: number;
   /** Maximum messages to fetch per channel. Safety cap. */
   maxMessagesPerChannel: number;
+  /** Fallback channel if guild listing fails (e.g. transient 403). */
+  fallbackChannelId?: string;
   /** Callback that enqueues a missed mention for routing. */
   enqueue: (message: BackfillMessage) => Promise<void>;
 }
@@ -170,11 +172,20 @@ export async function backfillMissedMentions(
       | Array<{ id: string; type: number }>
       | null;
     if (!raw) {
-      ctx.logger.warn("[backfill] could not list guild channels");
-      return { scanned: 0, enqueued: 0, skipped: 0 };
+      if (options.fallbackChannelId) {
+        ctx.logger.warn(
+          "[backfill] could not list guild channels — falling back to single channel",
+          { fallbackChannelId: options.fallbackChannelId },
+        );
+        channels = [options.fallbackChannelId];
+      } else {
+        ctx.logger.warn("[backfill] could not list guild channels and no fallback set");
+        return { scanned: 0, enqueued: 0, skipped: 0 };
+      }
+    } else {
+      // type 0 = GUILD_TEXT; type 5 = GUILD_ANNOUNCEMENT
+      channels = raw.filter((c) => c.type === 0 || c.type === 5).map((c) => c.id);
     }
-    // type 0 = GUILD_TEXT; type 5 = GUILD_ANNOUNCEMENT
-    channels = raw.filter((c) => c.type === 0 || c.type === 5).map((c) => c.id);
   }
 
   const processed = await loadProcessedIds(ctx);

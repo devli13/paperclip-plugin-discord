@@ -721,6 +721,7 @@ Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in c
           channelIds: config.backfillChannelIds ?? [],
           maxHours: config.backfillMaxHours ?? 24,
           maxMessagesPerChannel: config.backfillMaxMessagesPerChannel ?? 300,
+          fallbackChannelId: defaultChannelId || undefined,
           enqueue: async (m) => {
             // Synthesize a MessageCreateEvent-shaped object and run the normal
             // routing path. Same queue, same prompt, same dedup via markProcessed.
