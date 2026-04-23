@@ -1,7 +1,31 @@
-# paperclip-plugin-discord
+# @devli13/paperclip-plugin-discord
 
-[![npm](https://img.shields.io/npm/v/paperclip-plugin-discord)](https://www.npmjs.com/package/paperclip-plugin-discord)
+[![npm](https://img.shields.io/npm/v/@devli13/paperclip-plugin-discord)](https://www.npmjs.com/package/@devli13/paperclip-plugin-discord)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **Fork of [paperclip-plugin-discord](https://github.com/mvanhorn/paperclip-plugin-discord) by [@mvanhorn](https://github.com/mvanhorn)** (MIT). All upstream functionality preserved. This fork *adds* free-form @mention routing, DM support, and a serialized per-context message queue so agents can respond to community conversation end-to-end. See [ATTRIBUTION.md](./ATTRIBUTION.md) and [UPSTREAM_DIFF.md](./UPSTREAM_DIFF.md). Upstream PR pending.
+
+> **Companion project:** [`@devli13/mcp-discord`](https://github.com/devli13/mcp-discord) — standalone MCP server for Discord REST operations. Works with Claude Code, Paperclip, Gemini CLI, or any MCP client.
+
+---
+
+## Fork additions (opt-in, defaults preserve upstream behavior)
+
+| Config key | Default | What it does |
+|---|---|---|
+| `enableFreeFormMentions` | `false` | Route `@bot` in any channel to an agent invoke |
+| `enableDirectMessages` | `false` | Route DMs to the bot to an agent invoke (auto-adds `DIRECT_MESSAGES` intent) |
+| `mentionAgentId` | `""` | The agent that receives free-form mentions |
+| `dmAgentId` | `""` (→ mentionAgentId) | The agent that receives DMs |
+| `mentionCompanyId` | `""` (→ guild-resolved) | Company ID for invoke |
+| `messageQueueMaxDepth` | `10` | Drop additional messages when per-channel queue is full |
+| `messageQueueStaleSeconds` | `600` | Drop queued messages older than this |
+
+When on, inbound `@mention` and DM events are enqueued per `(guild_id, channel_id)` and processed one at a time. Upstream reply-to-notification routing continues to work unchanged.
+
+---
+
+## Upstream README below
 
 Bidirectional Discord integration for [Paperclip](https://github.com/paperclipai/paperclip). Push agent notifications to Discord, receive slash commands, approve requests with interactive buttons, gather community intelligence, run multi-agent sessions in threads, process media attachments, register custom commands, and deploy proactive agent suggestions.
 

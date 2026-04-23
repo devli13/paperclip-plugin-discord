@@ -31,6 +31,8 @@ import {
 import { handleInteraction, SLASH_COMMANDS, type CommandContext } from "./commands.js";
 import { runIntelligenceScan, runBackfill } from "./intelligence.js";
 import { connectGateway, type MessageCreateEvent } from "./gateway.js";
+// devli13 fork additions.
+import { enqueueForContext, contextKey } from "./message-queue.js";
 import {
   handleAcpOutput,
   routeMessageToAgent,
@@ -108,6 +110,21 @@ type DiscordConfig = {
    * different companies have dedicated approvals channels.
    */
   approvalsChannels?: Record<string, string>;
+  // -------- devli13 fork additions --------
+  /** Enable routing of free-form @mentions of the bot to an agent invoke. */
+  enableFreeFormMentions?: boolean;
+  /** Enable routing of DMs to an agent invoke. Requires DIRECT_MESSAGES intent. */
+  enableDirectMessages?: boolean;
+  /** Agent that receives free-form @mentions. */
+  mentionAgentId?: string;
+  /** Agent that receives DMs. Defaults to mentionAgentId. */
+  dmAgentId?: string;
+  /** Company ID for mention/DM routing. Falls back to guild→company resolution. */
+  mentionCompanyId?: string;
+  /** Max queued inbound messages per (guild, channel). */
+  messageQueueMaxDepth?: number;
+  /** Drop enqueued messages older than this many seconds before processing. */
+  messageQueueStaleSeconds?: number;
 };
 
 type IssueNotificationPayload = Record<string, unknown>;
@@ -339,8 +356,12 @@ const plugin = definePlugin({
     _cmdCtx = cmdCtx;
 
     // --- Register slash commands with Discord ---
+    // Also capture the bot's own user_id (== application id for bots) for mention
+    // detection in handleMessageCreate.
+    let botUserId: string | null = null;
     if (defaultGuildId) {
       const appId = await getApplicationId(ctx, token);
+      botUserId = appId;
       if (appId) {
         const registered = await registerSlashCommands(
           ctx,
@@ -353,6 +374,9 @@ const plugin = definePlugin({
           ctx.logger.info("Slash commands registered with Discord");
         }
       }
+    } else {
+      // No defaultGuildId — still need bot user id for mention routing.
+      botUserId = await getApplicationId(ctx, token);
     }
 
     // --- Reply routing handler for inbound messages ---
@@ -360,6 +384,24 @@ const plugin = definePlugin({
       if (config.enableInbound === false) return;
       // Ignore bot messages
       if (message.author.bot) return;
+
+      // devli13 fork — free-form @mention + DM routing (runs before reply-to
+      // logic so mentions that also happen to be replies are treated as
+      // mentions first).
+      const isDM = !message.guild_id;
+      const botMentioned = botUserId
+        ? (message.mentions ?? []).some((u) => u.id === botUserId)
+        : false;
+
+      if (isDM && config.enableDirectMessages) {
+        await routeToAgent(message, "dm");
+        return;
+      }
+      if (botMentioned && config.enableFreeFormMentions) {
+        await routeToAgent(message, "mention");
+        return;
+      }
+
       // Only handle replies to other messages
       if (!message.message_reference?.message_id) return;
 
@@ -442,12 +484,123 @@ const plugin = definePlugin({
       }
     }
 
+    // devli13 fork — route a single inbound message (mention or DM) to an
+    // agent invoke. Enqueues through the per-context serialized queue so
+    // simultaneous messages in the same channel are processed in order.
+    async function routeToAgent(
+      message: MessageCreateEvent,
+      kind: "mention" | "dm",
+    ): Promise<void> {
+      const targetAgentId =
+        kind === "dm"
+          ? (config.dmAgentId || config.mentionAgentId || "")
+          : (config.mentionAgentId || "");
+      if (!targetAgentId) {
+        ctx.logger.warn(
+          `[plugin] ${kind} received but no ${kind === "dm" ? "dmAgentId" : "mentionAgentId"} configured`,
+          { channel: message.channel_id, messageId: message.id },
+        );
+        return;
+      }
+      const resolvedCompanyId =
+        config.mentionCompanyId ||
+        (message.guild_id ? await resolveCompanyForGuild(message.guild_id) : "") ||
+        "";
+      if (!resolvedCompanyId) {
+        ctx.logger.warn(
+          `[plugin] ${kind} received but no company could be resolved for routing`,
+          { channel: message.channel_id, guild: message.guild_id ?? "dm" },
+        );
+        return;
+      }
+      const text = cleanMentionContent(message.content, botUserId);
+      if (!text.trim()) return;
+
+      const key = contextKey(message.guild_id, message.channel_id);
+      const enqueueResult = await enqueueForContext(
+        ctx,
+        key,
+        {
+          id: message.id,
+          enqueuedAt: Date.now(),
+          run: async () => {
+            const safeText = text.slice(0, 6000);
+            const prompt =
+              kind === "dm"
+                ? `New DM from @${message.author.username} (user_id: ${message.author.id}): "${safeText}". Reply in the DM channel (channel_id: ${message.channel_id}) using your Discord tools. Be helpful per your AGENTS.md.`
+                : `You were @mentioned by @${message.author.username} (user_id: ${message.author.id}) in channel_id ${message.channel_id}${message.guild_id ? ` (guild_id: ${message.guild_id})` : ""}. They said: "${safeText}". Reply in that channel using your Discord tools. Respond per your AGENTS.md.`;
+            try {
+              await ctx.agents.invoke(targetAgentId, resolvedCompanyId, {
+                prompt,
+                reason: `Discord ${kind}: message ${message.id}`,
+              });
+              await ctx.metrics.write(METRIC_NAMES.inboundRouted, 1);
+              ctx.logger.info(`[plugin] routed ${kind} to agent`, {
+                agentId: targetAgentId,
+                companyId: resolvedCompanyId,
+                channel: message.channel_id,
+                messageId: message.id,
+              });
+            } catch (err) {
+              ctx.logger.error(`[plugin] failed to invoke agent for ${kind}`, {
+                agentId: targetAgentId,
+                channel: message.channel_id,
+                messageId: message.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+        },
+        {
+          maxDepth: config.messageQueueMaxDepth ?? 10,
+          staleSeconds: config.messageQueueStaleSeconds ?? 600,
+        },
+      );
+      if (enqueueResult === "rejected-full") {
+        ctx.logger.warn(`[plugin] dropped ${kind} — context queue full`, {
+          channel: message.channel_id,
+          messageId: message.id,
+        });
+      }
+    }
+
+    async function resolveCompanyForGuild(guildId: string): Promise<string> {
+      // Prefer explicit guild→company mapping if one exists in config.
+      const guildMap = (config as any).companyChannels as Record<string, string> | undefined;
+      if (guildMap) {
+        for (const [companyId, channelId] of Object.entries(guildMap)) {
+          if (channelId === guildId) return companyId;
+        }
+      }
+      // Fallback: first company from Paperclip.
+      try {
+        const companies = await ctx.agents.list({ companyId: undefined as any });
+        if (companies && companies.length > 0 && (companies[0] as any).companyId) {
+          return (companies[0] as any).companyId;
+        }
+      } catch {
+        // ignore
+      }
+      return "";
+    }
+
+    function cleanMentionContent(content: string, selfId: string | null): string {
+      if (!selfId) return content;
+      // Strip mentions of the bot itself. Supports <@id>, <@!id>, <@&id> patterns.
+      return content
+        .replace(new RegExp(`<@!?${selfId}>`, "g"), "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
     const gatewayNeedsMessages =
       config.enableInbound !== false ||
       config.enableMediaPipeline === true ||
       config.enableCustomCommands === true ||
       config.enableProactiveSuggestions === true ||
-      config.enableIntelligence === true;
+      config.enableIntelligence === true ||
+      config.enableFreeFormMentions === true ||
+      config.enableDirectMessages === true;
 
     // --- Gateway connection for real-time interaction handling ---
     const gateway = await connectGateway(
@@ -460,6 +613,8 @@ const plugin = definePlugin({
       {
         listenForMessages: gatewayNeedsMessages,
         includeMessageContent: gatewayNeedsMessages,
+        listenForDirectMessages:
+          gatewayNeedsMessages && config.enableDirectMessages === true,
       },
     );
 

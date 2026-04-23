@@ -1,6 +1,7 @@
 {
-  "name": "paperclip-plugin-discord",
-  "version": "0.9.0",
+  "name": "@devli13/paperclip-plugin-discord",
+  "version": "0.9.1",
+  "description": "Fork of paperclip-plugin-discord by @mvanhorn. Adds free-form @mention routing, DM support, and a serialized per-context message queue so agents can respond to community conversation end-to-end in Discord.",
   "type": "module",
   "main": "./dist/index.js",
   "paperclipPlugin": {
@@ -26,11 +27,32 @@
     "vitest": "^3.0.0"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "ATTRIBUTION.md",
+    "UPSTREAM_DIFF.md"
   ],
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "discord",
+    "discord-bot",
+    "community",
+    "moderation",
+    "ai-agents"
+  ],
+  "author": "devli13",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mvanhorn/paperclip-plugin-discord.git"
+    "url": "git+https://github.com/devli13/paperclip-plugin-discord.git"
   },
-  "license": "MIT"
+  "bugs": {
+    "url": "https://github.com/devli13/paperclip-plugin-discord/issues"
+  },
+  "homepage": "https://github.com/devli13/paperclip-plugin-discord#readme",
+  "publishConfig": {
+    "access": "public"
+  }
 }

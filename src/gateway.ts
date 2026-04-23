@@ -8,6 +8,8 @@ const MAX_BACKOFF_MS = 60_000;
 const DEFAULT_RECONNECT_MS = 5000;
 const GUILD_INTENT = 1;
 const GUILD_MESSAGES_INTENT = 512;
+// devli13 fork — added DIRECT_MESSAGES intent so bot can receive DM events.
+const DIRECT_MESSAGES_INTENT = 4096;
 const MESSAGE_CONTENT_INTENT = 32768;
 
 interface GatewayPayload {
@@ -35,8 +37,12 @@ interface InteractionCreateEvent {
 export interface MessageCreateEvent {
   id: string;
   channel_id: string;
+  /** Omitted by Discord for DM messages — check for null/undefined to detect DMs. */
+  guild_id?: string | null;
   content: string;
   author: { id: string; username: string; bot?: boolean };
+  /** devli13 fork — populated by Discord for channel messages; lets us detect bot mentions. */
+  mentions?: Array<{ id: string; username: string; bot?: boolean }>;
   message_reference?: {
     message_id: string;
     channel_id: string;
@@ -50,6 +56,8 @@ type MessageHandler = (message: MessageCreateEvent) => Promise<void>;
 export interface GatewayOptions {
   listenForMessages?: boolean;
   includeMessageContent?: boolean;
+  /** devli13 fork — subscribe to DIRECT_MESSAGES intent so the bot receives DM events. Defaults to listenForMessages. */
+  listenForDirectMessages?: boolean;
 }
 
 export async function respondViaCallback(
@@ -116,9 +124,11 @@ export async function connectGateway(
   let lastHeartbeatIntervalMs = 41250;
   const listenForMessages = options.listenForMessages ?? Boolean(onMessage);
   const includeMessageContent = options.includeMessageContent ?? listenForMessages;
+  const listenForDirectMessages = options.listenForDirectMessages ?? listenForMessages;
   const intents =
     GUILD_INTENT |
     (listenForMessages ? GUILD_MESSAGES_INTENT : 0) |
+    (listenForDirectMessages ? DIRECT_MESSAGES_INTENT : 0) |
     (includeMessageContent ? MESSAGE_CONTENT_INTENT : 0);
 
   function getReconnectDelay(): number {

@@ -44,6 +44,24 @@ export const DEFAULT_CONFIG = {
   tridailyTimes: "07:00,13:00,19:00",
   companyChannels: {} as Record<string, string>,
   approvalsChannels: {} as Record<string, string>,
+  // -------- devli13 fork additions --------
+  // Route free-form @mentions of the bot in channels to an agent invoke.
+  // (Upstream only handles replies to bot notifications.)
+  enableFreeFormMentions: false,
+  // Route bot DMs to an agent invoke. Requires DIRECT_MESSAGES gateway intent
+  // (which this fork requests when enabled).
+  enableDirectMessages: false,
+  // The agent that receives free-form @mentions (singleAgent mode).
+  mentionAgentId: "",
+  // The agent that receives DMs. Defaults to mentionAgentId if unset.
+  dmAgentId: "",
+  // Company ID used when invoking the mention/DM agent. If blank, the plugin
+  // tries to resolve from guild→company routing.
+  mentionCompanyId: "",
+  // Max queued inbound messages per (guild, channel) before new ones are dropped.
+  messageQueueMaxDepth: 10,
+  // Drop enqueued messages older than this before processing.
+  messageQueueStaleSeconds: 600,
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";
