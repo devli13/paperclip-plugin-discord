@@ -65,7 +65,33 @@ dmAgentId?: string;                     // default "" (falls back to mentionAgen
 mentionCompanyId?: string;              // default "" (falls back to guild→company resolution)
 messageQueueMaxDepth?: number;          // default 10
 messageQueueStaleSeconds?: number;      // default 600
+
+// Delta 6 — downtime mention backfill
+enableMentionBackfill?: boolean;        // default false
+backfillMaxHours?: number;              // default 24
+backfillMaxMessagesPerChannel?: number; // default 300
+backfillChannelIds?: string[];          // default [] → all text/announcement channels
 ```
+
+### Delta 6 — Downtime mention backfill
+
+**New file:** `src/mention-backfill.ts` (~200 LOC)
+
+On plugin activation (fires on startup AND after an explicit disable→enable cycle), if `enableMentionBackfill` + `enableFreeFormMentions` are on, sweep configured channels for @mentions the bot missed while offline.
+
+**Strict "addressed" detection:** a mention counts as handled only if a bot-authored message later in the channel has `message_reference.message_id` equal to the mention's ID. This matches Ralph's enforced reply-to convention (see below). A bare bot message in the channel does NOT count.
+
+**Two-layer dedup:**
+1. Per-(guild, channel) watermark: `backfill_seen_<guild>_<channel>` → most recent message ID observed. Next sweep starts from there.
+2. Global processed-set (`backfill_processed_ids_v1`): capped at 2000 most-recent message IDs. Set on every successful route OR when the strict check determines an existing reply.
+
+**routeToAgent prompt update:** explicitly instructs the agent to include `reply_to_message_id: <message.id>` in the `discord_send_message` call. This:
+- Gives users a threaded-reply UX in Discord
+- Enables the strict backfill detector to recognize addressed mentions on restart
+
+**Why it fires on plugin activation, not every Gateway reconnect:** sweeping on each Gateway disconnect could flood the queue on a flappy connection. Startup/reload is the conservative place; the live handler catches brief blips between pings.
+
+**Upstream relevance:** this is the feature most Paperclip users will want once they hit the "bot missed my message while paperclip restarted" problem. Packaged as a separate commit in the PR so maintainers can evaluate independently.
 
 ## Tests
 

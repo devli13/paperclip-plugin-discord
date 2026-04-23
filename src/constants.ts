@@ -62,6 +62,16 @@ export const DEFAULT_CONFIG = {
   messageQueueMaxDepth: 10,
   // Drop enqueued messages older than this before processing.
   messageQueueStaleSeconds: 600,
+  // On Gateway ready (startup + reconnect), sweep channels for @mentions the
+  // bot missed while offline. Strict detection: only counts as "addressed" if
+  // the bot posted a reply-referenced message to the mention.
+  enableMentionBackfill: false,
+  // How far back the backfill will look. Older messages are ignored.
+  backfillMaxHours: 24,
+  // Safety cap on messages fetched per channel during backfill.
+  backfillMaxMessagesPerChannel: 300,
+  // Channels to scan. Empty = all text + announcement channels in defaultGuildId.
+  backfillChannelIds: [] as string[],
 } as const;
 
 export const DISCORD_API_BASE = "https://discord.com/api/v10";

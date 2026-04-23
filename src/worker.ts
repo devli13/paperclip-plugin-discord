@@ -33,6 +33,7 @@ import { runIntelligenceScan, runBackfill } from "./intelligence.js";
 import { connectGateway, type MessageCreateEvent } from "./gateway.js";
 // devli13 fork additions.
 import { enqueueForContext, contextKey } from "./message-queue.js";
+import { backfillMissedMentions, markProcessed } from "./mention-backfill.js";
 import {
   handleAcpOutput,
   routeMessageToAgent,
@@ -125,6 +126,14 @@ type DiscordConfig = {
   messageQueueMaxDepth?: number;
   /** Drop enqueued messages older than this many seconds before processing. */
   messageQueueStaleSeconds?: number;
+  /** On Gateway ready, backfill missed @mentions. */
+  enableMentionBackfill?: boolean;
+  /** Max lookback in hours for backfill. */
+  backfillMaxHours?: number;
+  /** Max messages fetched per channel during backfill. */
+  backfillMaxMessagesPerChannel?: number;
+  /** Channel allowlist for backfill; empty = all text/announcement channels in defaultGuildId. */
+  backfillChannelIds?: string[];
 };
 
 type IssueNotificationPayload = Record<string, unknown>;
@@ -525,15 +534,31 @@ const plugin = definePlugin({
           enqueuedAt: Date.now(),
           run: async () => {
             const safeText = text.slice(0, 6000);
+            // Strict reply-to convention: Ralph should use `reply_to_message_id`
+            // on his send_message call so the bot's response is linked to the
+            // mention via `message_reference`. Enables clean backfill detection
+            // and gives users a visually threaded reply UX.
             const prompt =
               kind === "dm"
-                ? `New DM from @${message.author.username} (user_id: ${message.author.id}): "${safeText}". Reply in the DM channel (channel_id: ${message.channel_id}) using your Discord tools. Be helpful per your AGENTS.md.`
-                : `You were @mentioned by @${message.author.username} (user_id: ${message.author.id}) in channel_id ${message.channel_id}${message.guild_id ? ` (guild_id: ${message.guild_id})` : ""}. They said: "${safeText}". Reply in that channel using your Discord tools. Respond per your AGENTS.md.`;
+                ? `New Discord DM from @${message.author.username} (user_id: ${message.author.id}). DM channel_id: ${message.channel_id}. Message ID: ${message.id}.
+
+They said: "${safeText}"
+
+Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in channel ${message.channel_id}. Include \`reply_to_message_id: ${message.id}\` in the call so the response threads to their message. Respond per your AGENTS.md. If you decide not to respond, that's fine — just note why in your reasoning.`
+                : `You were @mentioned in Discord by @${message.author.username} (user_id: ${message.author.id}) in channel_id ${message.channel_id}${message.guild_id ? ` (guild_id: ${message.guild_id})` : ""}. Message ID: ${message.id}.
+
+They said: "${safeText}"
+
+Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in channel ${message.channel_id}. **Include \`reply_to_message_id: ${message.id}\` in the call** — this threads your response to their message and lets the plugin mark it as addressed. Respond per your AGENTS.md. If you decide the message doesn't warrant a response, that's a valid choice; note why in your reasoning so we can iterate on policy.`;
             try {
               await ctx.agents.invoke(targetAgentId, resolvedCompanyId, {
                 prompt,
                 reason: `Discord ${kind}: message ${message.id}`,
               });
+              // Record in the backfill "processed" set so we don't re-enqueue
+              // this mention on the next Gateway reconnect, even if Ralph chose
+              // not to reply-thread.
+              await markProcessed(ctx, message.id);
               await ctx.metrics.write(METRIC_NAMES.inboundRouted, 1);
               ctx.logger.info(`[plugin] routed ${kind} to agent`, {
                 agentId: targetAgentId,
@@ -617,6 +642,56 @@ const plugin = definePlugin({
           gatewayNeedsMessages && config.enableDirectMessages === true,
       },
     );
+
+    // devli13 fork — Delta 5: backfill mentions missed during downtime.
+    // Runs once on plugin activation (which happens on startup AND after an
+    // explicit disable→enable cycle). The Gateway's own reconnect loop does
+    // not re-invoke this closure, so a transient Discord Gateway disconnect
+    // won't trigger the sweep — but that's a trade-off: sweeping on every
+    // Gateway reconnect would risk duplicate enqueues across flap scenarios,
+    // and the live handler catches messages during brief blips. Startup +
+    // plugin reload is the conservative place to backfill.
+    if (
+      config.enableMentionBackfill &&
+      config.enableFreeFormMentions &&
+      defaultGuildId &&
+      botUserId &&
+      config.mentionAgentId
+    ) {
+      // Fire-and-forget so it doesn't block other plugin startup work.
+      setTimeout(() => {
+        backfillMissedMentions(ctx, {
+          botUserId,
+          botToken: token,
+          guildId: defaultGuildId,
+          channelIds: config.backfillChannelIds ?? [],
+          maxHours: config.backfillMaxHours ?? 24,
+          maxMessagesPerChannel: config.backfillMaxMessagesPerChannel ?? 300,
+          enqueue: async (m) => {
+            // Synthesize a MessageCreateEvent-shaped object and run the normal
+            // routing path. Same queue, same prompt, same dedup via markProcessed.
+            const synthetic: MessageCreateEvent = {
+              id: m.id,
+              channel_id: m.channel_id,
+              guild_id: m.guild_id ?? defaultGuildId,
+              content: m.content,
+              author: m.author,
+              mentions: m.mentions,
+              message_reference: m.message_reference
+                ? {
+                    message_id: m.message_reference.message_id,
+                    channel_id: m.message_reference.channel_id ?? m.channel_id,
+                    guild_id: m.message_reference.guild_id,
+                  }
+                : undefined,
+            };
+            await routeToAgent(synthetic, "mention");
+          },
+        }).catch((err) => {
+          ctx.logger.warn("[plugin] backfill sweep failed", { error: String(err) });
+        });
+      }, 3000);
+    }
 
     ctx.events.on("plugin.stopping", async () => {
       gateway.close();

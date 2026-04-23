@@ -20,6 +20,10 @@
 | `mentionCompanyId` | `""` (→ guild-resolved) | Company ID for invoke |
 | `messageQueueMaxDepth` | `10` | Drop additional messages when per-channel queue is full |
 | `messageQueueStaleSeconds` | `600` | Drop queued messages older than this |
+| `enableMentionBackfill` | `false` | On plugin activation, sweep channels for missed mentions during downtime |
+| `backfillMaxHours` | `24` | How far back to look for missed mentions |
+| `backfillMaxMessagesPerChannel` | `300` | Safety cap on messages fetched per channel |
+| `backfillChannelIds` | `[]` | Channels to scan; empty = all text/announcement channels in `defaultGuildId` |
 
 When on, inbound `@mention` and DM events are enqueued per `(guild_id, channel_id)` and processed one at a time. Upstream reply-to-notification routing continues to work unchanged.
 

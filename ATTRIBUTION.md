@@ -14,6 +14,8 @@ This package is a fork of **[paperclip-plugin-discord](https://github.com/mvanho
 
 4. **`DiscordConfig` extensions** — new optional fields `enableFreeFormMentions`, `enableDirectMessages`, `mentionAgentId`, `dmAgentId`, `mentionCompanyId`, `messageQueueMaxDepth`, `messageQueueStaleSeconds`. All defaults preserve upstream behavior.
 
+5. **Downtime mention backfill** (new file: `src/mention-backfill.ts`) — on plugin activation, sweep channels for @mentions missed while the bot was offline. Strict detection: only treats a mention as addressed if there's a `message_reference`-linked bot reply after it. Bounded lookback via `backfillMaxHours` (default 24h). Two-layer dedup (per-channel watermark + global processed-set).
+
 See [UPSTREAM_DIFF.md](./UPSTREAM_DIFF.md) for the exact line-by-line diff intended for the upstream pull request.
 
 ## Upstream PR
