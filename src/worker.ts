@@ -551,10 +551,10 @@ They said: "${safeText}"
 
 Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in channel ${message.channel_id}. **Include \`reply_to_message_id: ${message.id}\` in the call** — this threads your response to their message and lets the plugin mark it as addressed. Respond per your AGENTS.md. If you decide the message doesn't warrant a response, that's a valid choice; note why in your reasoning so we can iterate on policy.`;
             try {
-              await ctx.agents.invoke(targetAgentId, resolvedCompanyId, {
+              const result = (await ctx.agents.invoke(targetAgentId, resolvedCompanyId, {
                 prompt,
                 reason: `Discord ${kind}: message ${message.id}`,
-              });
+              })) as { runId?: string } | undefined;
               // Record in the backfill "processed" set so we don't re-enqueue
               // this mention on the next Gateway reconnect, even if Ralph chose
               // not to reply-thread.
@@ -565,7 +565,15 @@ Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in c
                 companyId: resolvedCompanyId,
                 channel: message.channel_id,
                 messageId: message.id,
+                runId: result?.runId,
               });
+              // devli13 fork — wait for the agent's run to finish before
+              // dequeuing the next message. Paperclip's ctx.agents.invoke()
+              // returns as soon as the invoke is accepted (not when the run
+              // completes), and agents with maxConcurrentRuns=1 (default)
+              // silently collapse overlapping invokes. Without this wait,
+              // queued mentions all get NOOP'd into the first run.
+              await waitForAgentIdle(baseUrl, targetAgentId, resolvedCompanyId, ctx, 8 * 60 * 1000);
             } catch (err) {
               ctx.logger.error(`[plugin] failed to invoke agent for ${kind}`, {
                 agentId: targetAgentId,
@@ -607,6 +615,52 @@ Reply using your discord tools (\`mcp__gw__discord__discord_send_message\`) in c
         // ignore
       }
       return "";
+    }
+
+    // devli13 fork — poll live-runs until the target agent has no active
+    // run. Used between queued invocations so the per-channel message queue
+    // drains one-at-a-time at the agent level, not just the plugin level.
+    async function waitForAgentIdle(
+      baseUrl: string,
+      agentId: string,
+      companyId: string,
+      pluginCtx: typeof ctx,
+      maxWaitMs: number,
+    ): Promise<void> {
+      const deadline = Date.now() + maxWaitMs;
+      let consecutiveFailures = 0;
+      // Small initial delay — give the invoke time to actually register as a
+      // live-run before we poll.
+      await new Promise((r) => setTimeout(r, 1500));
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(`${baseUrl}/api/companies/${companyId}/live-runs`, {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (res.ok) {
+            const runs = (await res.json()) as Array<{ agentId: string; status?: string }>;
+            const active = runs.filter((r) => r.agentId === agentId);
+            if (active.length === 0) return;
+            consecutiveFailures = 0;
+          } else {
+            consecutiveFailures++;
+          }
+        } catch (err) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= 5) {
+            pluginCtx.logger.warn("[plugin] waitForAgentIdle giving up after repeated errors", {
+              agentId,
+              error: String(err),
+            });
+            return;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      pluginCtx.logger.warn("[plugin] waitForAgentIdle timed out — draining next message anyway", {
+        agentId,
+        maxWaitMs,
+      });
     }
 
     function cleanMentionContent(content: string, selfId: string | null): string {
